@@ -124,7 +124,6 @@ When implementing account auth handling:
 - [ ] LinkedIn provider: conversation discovery + incremental sync (TBD)
 - [ ] LinkedIn provider: send DM (TBD)
 - [ ] Proxy + per-account rate limiting
-- [ ] Dockerfile + deployment guide
 
 ---
 
