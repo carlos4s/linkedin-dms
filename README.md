@@ -87,21 +87,51 @@ Contributors can then replace the provider implementation with:
 
 ## Getting started (for contributors)
 
-This repo will use Python 3.11+.
+This repo uses **Python 3.11+** and a minimal dependency set.
 
 ### Setup
 ```bash
-
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
-
 ```
 
-### Run (planned)
+### Run the API (FastAPI)
 ```bash
-python -m apps.api
+uvicorn apps.api.main:app --reload --host 127.0.0.1 --port 8899
 ```
+
+Open:
+- Health: http://127.0.0.1:8899/health
+- Swagger UI: http://127.0.0.1:8899/docs
+
+### Quick test with curl (no real cookies)
+> This only verifies the API + SQLite wiring. Provider methods are still TODO.
+
+1) Create an account (DO NOT use real cookies in public logs)
+```bash
+curl -s -X POST http://127.0.0.1:8899/accounts \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"test","li_at":"REDACTED","jsessionid":null,"proxy_url":null}'
+```
+
+2) List threads (will be empty until provider is implemented)
+```bash
+curl -s 'http://127.0.0.1:8899/threads?account_id=1'
+```
+
+3) Trigger sync (currently returns a note until provider is implemented)
+```bash
+curl -s -X POST http://127.0.0.1:8899/sync \
+  -H 'Content-Type: application/json' \
+  -d '{"account_id":1,"limit_per_thread":50}'
+```
+
+### Important note: SQLite + FastAPI threads
+FastAPI runs normal `def` endpoints inside a threadpool. SQLite connections are thread-bound by default.
+
+For MVP simplicity we open the connection with `check_same_thread=False`.
+If you later add concurrency/background workers, consider using one connection per request or a pool.
 
 ## How to contribute
 
