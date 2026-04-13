@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
@@ -95,6 +96,31 @@ class SyncIn(BaseModel):
     )
 
 
+def _map_provider_http_error(exc: httpx.HTTPStatusError) -> HTTPException:
+    """Map an upstream LinkedIn HTTP error to a stable API response."""
+    status = exc.response.status_code
+    if status in (401, 403):
+        return HTTPException(
+            status_code=401,
+            detail="LinkedIn session expired or rejected — re-authenticate via POST /accounts/refresh",
+        )
+    if status in (429, 999):
+        return HTTPException(
+            status_code=429,
+            detail="LinkedIn rate limit hit — retry later",
+        )
+    if 400 <= status < 500:
+        return HTTPException(
+            status_code=502,
+            detail=f"LinkedIn rejected the request (HTTP {status}) — possible API contract drift",
+        )
+    # 5xx or anything else
+    return HTTPException(
+        status_code=502,
+        detail=f"LinkedIn upstream error (HTTP {status})",
+    )
+
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -184,6 +210,13 @@ def sync_account(body: SyncIn):
             status_code=401,
             detail="LinkedIn session expired — re-authenticate via POST /accounts/refresh",
         ) from exc
+    except httpx.HTTPStatusError as exc:
+        raise _map_provider_http_error(exc) from exc
+    except ConnectionError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="LinkedIn provider network error — check connectivity and retry",
+        ) from exc
     except NotImplementedError:
         raise HTTPException(
             status_code=501,
@@ -228,6 +261,13 @@ def send_message(body: SendIn):
         raise HTTPException(
             status_code=401,
             detail="LinkedIn session expired — re-authenticate via POST /accounts/refresh",
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        raise _map_provider_http_error(exc) from exc
+    except ConnectionError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="LinkedIn provider network error — check connectivity and retry",
         ) from exc
     except NotImplementedError:
         raise HTTPException(
