@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from libs.core.models import AccountAuth, ProxyConfig
+from libs.core.models import AccountAuth, LinkedInRuntimeHints, ProxyConfig
 from libs.providers.linkedin.provider import (
     LinkedInProvider,
     LinkedInThread,
@@ -544,6 +544,18 @@ class TestBuildHeaders:
         assert "x-li-page-instance" in headers
         assert headers["x-li-lang"] == "en_US"
 
+    def test_runtime_hints_override_graphql_headers(self, auth):
+        p = LinkedInProvider(
+            auth=auth,
+            runtime_hints=LinkedInRuntimeHints(
+                x_li_track='{"clientVersion":"1.13.50000"}',
+                csrf_token="ajax:runtime123",
+            ),
+        )
+        headers = p._build_graphql_headers()
+        assert headers["x-li-track"] == '{"clientVersion":"1.13.50000"}'
+        assert headers["csrf-token"] == "ajax:runtime123"
+
     def test_build_cookies_includes_li_at_and_jsessionid(self, provider):
         cookies = provider._build_basic_cookies()
         assert cookies["li_at"] == "test-li-at"
@@ -788,6 +800,43 @@ class TestGetProfileId:
         with _patch_client(mock_client):
             pid = p._get_profile_id()
         assert pid is None
+
+
+class TestRuntimeQueryIds:
+    def test_runtime_conversations_query_id_overrides_default(self, auth):
+        p = LinkedInProvider(
+            auth=auth,
+            runtime_hints=LinkedInRuntimeHints(
+                conversations_query_id="messengerConversations.live123",
+            ),
+        )
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        mock_client.get.return_value = _mock_resp(_graphql_conversations_response([], sync_token=None))
+        p._profile_id = "urn:li:fsd_profile:ABC123"
+        p._profile_id_fetched = True
+        with _patch_client(mock_client):
+            p.list_threads()
+        url = mock_client.get.call_args[0][0]
+        assert "messengerConversations.live123" in url
+        assert _CONVERSATIONS_QUERY_ID not in url
+
+    def test_invalid_runtime_conversations_query_id_falls_back(self, auth):
+        p = LinkedInProvider(
+            auth=auth,
+            runtime_hints=LinkedInRuntimeHints(
+                conversations_query_id="not-a-linkedin-query-id",
+            ),
+        )
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        mock_client.get.return_value = _mock_resp(_graphql_conversations_response([], sync_token=None))
+        p._profile_id = "urn:li:fsd_profile:ABC123"
+        p._profile_id_fetched = True
+        with _patch_client(mock_client):
+            p.list_threads()
+        url = mock_client.get.call_args[0][0]
+        assert _CONVERSATIONS_QUERY_ID in url
 
 
 # ---------------------------------------------------------------------------

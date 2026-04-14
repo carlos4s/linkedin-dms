@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
 from libs.core.job_runner import run_send, run_sync, SendResult, SyncConfig, SyncResult
-from libs.core.models import AccountAuth, ProxyConfig
+from libs.core.models import AccountAuth, LinkedInRuntimeHints, ProxyConfig
 from libs.core.redaction import configure_logging, redact_for_log, redact_string
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider
@@ -28,6 +28,34 @@ class AuthCheckResponse(BaseModel):
     error: Optional[str] = None
 
 
+class LinkedInRuntimeHintsIn(BaseModel):
+    x_li_track: str | None = Field(
+        None,
+        description="Optional live x-li-track header captured from a real LinkedIn browser session.",
+    )
+    csrf_token: str | None = Field(
+        None,
+        description="Optional live csrf-token header captured from a real LinkedIn browser session.",
+    )
+    conversations_query_id: str | None = Field(
+        None,
+        description="Optional live messengerConversations queryId captured from LinkedIn GraphQL traffic.",
+    )
+    messages_query_id: str | None = Field(
+        None,
+        description="Optional live messengerMessages queryId captured from LinkedIn GraphQL traffic.",
+    )
+
+    def to_runtime_hints(self) -> LinkedInRuntimeHints | None:
+        hints = LinkedInRuntimeHints(
+            x_li_track=self.x_li_track,
+            csrf_token=self.csrf_token,
+            conversations_query_id=self.conversations_query_id,
+            messages_query_id=self.messages_query_id,
+        )
+        return None if hints.is_empty() else hints
+
+
 class AccountCreateIn(BaseModel):
     label: str = Field(..., description="Human label, e.g. 'sales-1'")
     li_at: str | None = Field(None, description="LinkedIn li_at cookie value (required if cookies not provided)")
@@ -37,6 +65,10 @@ class AccountCreateIn(BaseModel):
         description="Cookie header string, e.g. 'li_at=xxx; JSESSIONID=yyy'. Overrides li_at/jsessionid fields.",
     )
     proxy_url: str | None = Field(None, description="Optional proxy URL")
+    runtime_hints: LinkedInRuntimeHintsIn | None = Field(
+        None,
+        description="Optional live browser GraphQL metadata captured by the Chrome extension.",
+    )
 
     @model_validator(mode="after")
     def require_auth(self) -> AccountCreateIn:
@@ -57,6 +89,10 @@ class AccountRefreshIn(BaseModel):
     cookies: str | None = Field(
         None,
         description="Cookie header string, e.g. 'li_at=xxx; JSESSIONID=yyy'. Overrides li_at/jsessionid fields.",
+    )
+    runtime_hints: LinkedInRuntimeHintsIn | None = Field(
+        None,
+        description="Optional live browser GraphQL metadata captured by the Chrome extension.",
     )
 
     @model_validator(mode="after")
@@ -93,6 +129,10 @@ class SyncIn(BaseModel):
     delay_between_pages_s: float = Field(
         1.5, ge=0, le=60, description="Seconds to pause between fetch_messages pages",
     )
+    runtime_hints: LinkedInRuntimeHintsIn | None = Field(
+        None,
+        description="Optional live browser GraphQL metadata captured by the Chrome extension.",
+    )
 
 
 @app.get("/health")
@@ -107,7 +147,13 @@ def create_account(body: AccountCreateIn):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=redact_string(str(exc)))
     proxy = ProxyConfig(url=body.proxy_url) if body.proxy_url else None
-    account_id = storage.create_account(label=body.label, auth=auth, proxy=proxy)
+    runtime_hints = body.runtime_hints.to_runtime_hints() if body.runtime_hints else None
+    account_id = storage.create_account(
+        label=body.label,
+        auth=auth,
+        proxy=proxy,
+        runtime=runtime_hints,
+    )
     logger.info("Account created: %s", redact_for_log({"account_id": account_id, "label": body.label}))
     return {"account_id": account_id}
 
@@ -123,6 +169,9 @@ def refresh_account(body: AccountRefreshIn):
         storage.update_account_auth(body.account_id, auth)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
+    runtime_hints = body.runtime_hints.to_runtime_hints() if body.runtime_hints else None
+    if runtime_hints:
+        storage.update_account_runtime(body.account_id, runtime_hints)
     logger.info("Account refreshed: %s", redact_for_log({"account_id": body.account_id}))
     return {"ok": True, "account_id": body.account_id}
 
@@ -132,10 +181,11 @@ def auth_check(account_id: int):
     try:
         auth = storage.get_account_auth(account_id)
         proxy = storage.get_account_proxy(account_id)
+        runtime_hints = storage.get_account_runtime(account_id)
     except KeyError:
         return {"status": "failed", "error": "account not found"}
 
-    provider = LinkedInProvider(auth=auth, proxy=proxy)
+    provider = LinkedInProvider(auth=auth, proxy=proxy, runtime_hints=runtime_hints)
     result = provider.check_auth()
 
     if result.ok:
@@ -155,9 +205,18 @@ def sync_account(body: SyncIn):
     try:
         auth = storage.get_account_auth(body.account_id)
         proxy = storage.get_account_proxy(body.account_id)
+        runtime_hints = storage.get_account_runtime(body.account_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
-    provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=body.account_id)
+    requested_hints = body.runtime_hints.to_runtime_hints() if body.runtime_hints else None
+    if requested_hints:
+        runtime_hints = storage.update_account_runtime(body.account_id, requested_hints)
+    provider = LinkedInProvider(
+        auth=auth,
+        proxy=proxy,
+        account_id=body.account_id,
+        runtime_hints=runtime_hints,
+    )
     sync_config = SyncConfig(
         delay_between_threads_s=body.delay_between_threads_s,
         delay_between_pages_s=body.delay_between_pages_s,

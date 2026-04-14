@@ -12,6 +12,10 @@ async function getConfig() {
   const result = await chrome.storage.local.get({
     serviceUrl: SERVICE_URL_DEFAULT,
     accountId: null,
+    xLiTrack: null,
+    csrfToken: null,
+    conversationsQueryId: null,
+    messagesQueryId: null,
   });
   return result;
 }
@@ -39,6 +43,33 @@ async function getLinkedInCookies() {
   if (jsessionid) cookies.JSESSIONID = jsessionid.value.replace(/"/g, "");
 
   return cookies;
+}
+
+function buildRuntimeHints(state) {
+  const hints = {};
+  if (state.xLiTrack) hints.x_li_track = state.xLiTrack;
+  if (state.csrfToken) hints.csrf_token = state.csrfToken;
+  if (state.conversationsQueryId) hints.conversations_query_id = state.conversationsQueryId;
+  if (state.messagesQueryId) hints.messages_query_id = state.messagesQueryId;
+  return Object.keys(hints).length > 0 ? hints : null;
+}
+
+function extractGraphqlQueryId(url) {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const queryId = parsed.searchParams.get("queryId");
+    if (!queryId) return null;
+    if (queryId.startsWith("messengerConversations.")) {
+      return { storageKey: "conversationsQueryId", value: queryId };
+    }
+    if (queryId.startsWith("messengerMessages.")) {
+      return { storageKey: "messagesQueryId", value: queryId };
+    }
+  } catch (_err) {
+    return null;
+  }
+  return null;
 }
 
 // ─── Cookie Monitoring ──────────────────────────────────────────────────────
@@ -72,6 +103,7 @@ async function pushRefresh(config, cookies) {
     account_id: config.accountId,
     li_at: cookies.li_at,
     jsessionid: cookies.JSESSIONID || null,
+    runtime_hints: buildRuntimeHints(config),
   };
 
   const resp = await fetch(`${config.serviceUrl}/accounts/refresh`, {
@@ -94,6 +126,7 @@ async function registerAccount(config, cookies) {
     label: "chrome-extension",
     li_at: cookies.li_at,
     jsessionid: cookies.JSESSIONID || null,
+    runtime_hints: buildRuntimeHints(config),
   };
 
   const resp = await fetch(`${config.serviceUrl}/accounts`, {
@@ -119,11 +152,17 @@ async function registerAccount(config, cookies) {
 
 chrome.webRequest.onSendHeaders.addListener(
   (details) => {
-    const track = details.requestHeaders.find(h => h.name === "x-li-track");
-    const csrf = details.requestHeaders.find(h => h.name === "csrf-token");
-    if (track || csrf) {
+    const requestHeaders = details.requestHeaders || [];
+    const track = requestHeaders.find(h => h.name === "x-li-track");
+    const csrf = requestHeaders.find(h => h.name === "csrf-token");
+    const queryId = extractGraphqlQueryId(details.url);
+    if (track || csrf || queryId) {
+      const updates = {};
+      if (track) updates.xLiTrack = track.value;
+      if (csrf) updates.csrfToken = csrf.value;
+      if (queryId) updates[queryId.storageKey] = queryId.value;
       // store for provider use
-      chrome.storage.local.set({ xLiTrack: track?.value, csrfToken: csrf?.value });
+      chrome.storage.local.set(updates);
     }
   },
   { urls: [VOYAGER_API_PATTERN] },
@@ -157,7 +196,10 @@ async function handleManualSync() {
   const resp = await fetch(`${config.serviceUrl}/sync`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ account_id: config.accountId }),
+    body: JSON.stringify({
+      account_id: config.accountId,
+      runtime_hints: buildRuntimeHints(config),
+    }),
   });
 
   if (!resp.ok) {

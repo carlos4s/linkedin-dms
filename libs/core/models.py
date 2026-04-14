@@ -44,6 +44,53 @@ class AccountAuth:
 
 
 @dataclass(frozen=True)
+class LinkedInRuntimeHints:
+    """Optional live browser metadata for LinkedIn's GraphQL contract.
+
+    These values are opportunistically captured from a real browser session and
+    let the provider track LinkedIn contract drift without requiring a code
+    change every time query IDs rotate.
+    """
+
+    x_li_track: Optional[str] = None
+    csrf_token: Optional[str] = None
+    conversations_query_id: Optional[str] = None
+    messages_query_id: Optional[str] = None
+
+    def merged_with(self, newer: Optional["LinkedInRuntimeHints"]) -> "LinkedInRuntimeHints":
+        if newer is None:
+            return self
+        return LinkedInRuntimeHints(
+            x_li_track=newer.x_li_track or self.x_li_track,
+            csrf_token=newer.csrf_token or self.csrf_token,
+            conversations_query_id=(
+                newer.conversations_query_id or self.conversations_query_id
+            ),
+            messages_query_id=newer.messages_query_id or self.messages_query_id,
+        )
+
+    def is_empty(self) -> bool:
+        return not any((
+            self.x_li_track,
+            self.csrf_token,
+            self.conversations_query_id,
+            self.messages_query_id,
+        ))
+
+    def __repr__(self) -> str:
+        return (
+            "LinkedInRuntimeHints("
+            f"x_li_track={'[REDACTED]' if self.x_li_track else None}, "
+            f"csrf_token={'[REDACTED]' if self.csrf_token else None}, "
+            f"conversations_query_id={self.conversations_query_id!r}, "
+            f"messages_query_id={self.messages_query_id!r})"
+        )
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+
+@dataclass(frozen=True)
 class Account:
     id: int
     label: str

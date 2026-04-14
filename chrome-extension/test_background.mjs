@@ -6,7 +6,7 @@
  *   AC1 – extension loads without error
  *   AC2 – cookie capture registers a new account via POST /accounts
  *   AC3 – cookie change on existing account triggers POST /accounts/refresh
- *   AC4 – header capture stores xLiTrack / csrfToken
+ *   AC4 – header capture stores xLiTrack / csrfToken / GraphQL queryIds
  *   AC5 – MANUAL_SYNC message triggers POST /sync
  *   AC6 – MANUAL_REFRESH message triggers refresh or register
  */
@@ -134,6 +134,7 @@ function loadBackground(env) {
     Date,
     JSON,
     Error,
+    URL,
     setTimeout,
   });
   const script = new Script(code, { filename: "background.js" });
@@ -180,6 +181,7 @@ async function testAC2_newAccountRegistration() {
     assert(body.li_at === "new-li-at-value", "li_at value passed correctly");
     assert(body.jsessionid === "fake-jsessionid-123", "JSESSIONID passed (quotes stripped)");
     assert(body.label === "chrome-extension", "label is 'chrome-extension'");
+    assert(body.runtime_hints == null, "runtime hints omitted until browser headers are captured");
   }
   assert(env.storage.accountId === 42, "accountId stored after registration");
   assert(env.storage.lastStatus === "connected", "status set to connected");
@@ -207,6 +209,7 @@ async function testAC3_cookieRefresh() {
     assert(body.account_id === 1, "account_id passed correctly");
     assert(body.li_at === "refreshed-li-at", "updated li_at value passed");
     assert(body.jsessionid === "fake-jsessionid-123", "JSESSIONID included");
+    assert(body.runtime_hints == null, "runtime hints omitted when none were captured");
   }
   assert(env.storage.lastStatus === "connected", "status set to connected");
 }
@@ -240,7 +243,7 @@ async function testAC3_ignoresNonLinkedIn() {
 }
 
 async function testAC4_headerCapture() {
-  console.log("\nAC4: Header capture stores xLiTrack and csrfToken");
+  console.log("\nAC4: Header capture stores xLiTrack, csrfToken, and GraphQL queryIds");
   const env = buildEnv();
   loadBackground(env);
 
@@ -249,6 +252,7 @@ async function testAC4_headerCapture() {
 
   // Simulate a request with both headers
   headerListener.fn({
+    url: "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql?queryId=messengerConversations.live123&variables=(mailboxUrn:urn:li:fsd_profile:abc)",
     requestHeaders: [
       { name: "x-li-track", value: '{"clientVersion":"1.13.42912"}' },
       { name: "csrf-token", value: "ajax:abc123" },
@@ -258,6 +262,14 @@ async function testAC4_headerCapture() {
 
   assert(env.storage.xLiTrack === '{"clientVersion":"1.13.42912"}', "xLiTrack stored");
   assert(env.storage.csrfToken === "ajax:abc123", "csrfToken stored");
+  assert(env.storage.conversationsQueryId === "messengerConversations.live123", "conversations queryId stored");
+
+  headerListener.fn({
+    url: "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql?queryId=messengerMessages.live456&variables=(conversationUrn:urn:li:msg_conversation:abc)",
+    requestHeaders: [],
+  });
+
+  assert(env.storage.messagesQueryId === "messengerMessages.live456", "messages queryId stored");
 }
 
 async function testAC5_manualSync() {
@@ -276,6 +288,7 @@ async function testAC5_manualSync() {
   if (syncCall) {
     const body = JSON.parse(syncCall.options.body);
     assert(body.account_id === 1, "account_id passed to sync");
+    assert(body.runtime_hints == null, "runtime hints omitted when not yet captured");
   }
 }
 
@@ -292,6 +305,46 @@ async function testAC6_manualRefresh() {
   assert(!!refreshCall, "POST /accounts/refresh was called");
 }
 
+async function testAC6b_runtimeHintsIncludedInRequests() {
+  console.log("\nAC6b: Captured runtime hints are sent to backend requests");
+  const env = buildEnv();
+  env.storage.accountId = 9;
+  env.storage.xLiTrack = '{"clientVersion":"1.13.50000"}';
+  env.storage.csrfToken = "ajax:runtime123";
+  env.storage.conversationsQueryId = "messengerConversations.runtime789";
+  env.storage.messagesQueryId = "messengerMessages.runtime987";
+  loadBackground(env);
+
+  await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  const syncCall = env.fetchLog.find(f => f.url.includes("/sync"));
+  assert(!!syncCall, "POST /sync was called with runtime hints");
+  if (syncCall) {
+    const body = JSON.parse(syncCall.options.body);
+    assert(body.runtime_hints.x_li_track === '{"clientVersion":"1.13.50000"}', "sync includes x_li_track");
+    assert(body.runtime_hints.csrf_token === "ajax:runtime123", "sync includes csrf_token");
+    assert(body.runtime_hints.conversations_query_id === "messengerConversations.runtime789", "sync includes conversations queryId");
+    assert(body.runtime_hints.messages_query_id === "messengerMessages.runtime987", "sync includes messages queryId");
+  }
+
+  const cookieListener = env.listeners.cookieChanged[0];
+  await new Promise((resolve) => {
+    cookieListener({
+      cookie: { domain: ".linkedin.com", name: "li_at", value: "runtime-li-at" },
+      removed: false,
+    });
+    setTimeout(resolve, 50);
+  });
+  const refreshCall = env.fetchLog.find(f => f.url.includes("/accounts/refresh"));
+  assert(!!refreshCall, "POST /accounts/refresh was called with runtime hints");
+  if (refreshCall) {
+    const body = JSON.parse(refreshCall.options.body);
+    assert(body.runtime_hints.x_li_track === '{"clientVersion":"1.13.50000"}', "refresh includes x_li_track");
+    assert(body.runtime_hints.csrf_token === "ajax:runtime123", "refresh includes csrf_token");
+    assert(body.runtime_hints.conversations_query_id === "messengerConversations.runtime789", "refresh includes conversations queryId");
+    assert(body.runtime_hints.messages_query_id === "messengerMessages.runtime987", "refresh includes messages queryId");
+  }
+}
+
 // ─── Run ────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -305,6 +358,7 @@ async function main() {
   await testAC4_headerCapture();
   await testAC5_manualSync();
   await testAC6_manualRefresh();
+  await testAC6b_runtimeHintsIncludedInRequests();
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
   process.exit(failed > 0 ? 1 : 0);

@@ -22,6 +22,8 @@ async function loadState() {
     lastUpdated: null,
     xLiTrack: null,
     csrfToken: null,
+    conversationsQueryId: null,
+    messagesQueryId: null,
   });
 
   backendUrlInput.value = state.serviceUrl;
@@ -50,10 +52,17 @@ async function loadState() {
   // Headers
   const hasTrack = !!state.xLiTrack;
   const hasCsrf = !!state.csrfToken;
-  if (hasTrack && hasCsrf) {
+  const hasQueryIds = !!state.conversationsQueryId || !!state.messagesQueryId;
+  if (hasTrack && hasCsrf && hasQueryIds) {
+    headersStatusEl.textContent = "x-li-track, csrf-token, queryIds";
+  } else if (hasTrack && hasCsrf) {
     headersStatusEl.textContent = "x-li-track, csrf-token";
-  } else if (hasTrack || hasCsrf) {
-    headersStatusEl.textContent = hasTrack ? "x-li-track only" : "csrf-token only";
+  } else if (hasTrack || hasCsrf || hasQueryIds) {
+    const parts = [];
+    if (hasTrack) parts.push("x-li-track");
+    if (hasCsrf) parts.push("csrf-token");
+    if (hasQueryIds) parts.push("queryIds");
+    headersStatusEl.textContent = parts.join(", ");
   } else {
     headersStatusEl.textContent = "—";
   }

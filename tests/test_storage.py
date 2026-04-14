@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 from libs.core import crypto
-from libs.core.models import AccountAuth
+from libs.core.models import AccountAuth, LinkedInRuntimeHints
 from libs.core.storage import Storage
 
 
@@ -56,8 +56,8 @@ def test_schema_version_exists_after_migrate(storage):
 
 
 def test_schema_version_is_current_after_migrate(storage):
-    """Regression: migrate() leaves schema at current version (3 = outbound_sends)."""
-    assert storage._get_schema_version() == 3
+    """Regression: migrate() leaves schema at current version (4 = runtime metadata)."""
+    assert storage._get_schema_version() == 4
 
 
 def test_migrate_idempotent(storage):
@@ -116,7 +116,7 @@ def test_migrate_upgrades_preexisting_baseline_db(tmp_path):
     s.migrate()
 
     # Verify schema_version is current.
-    assert s._get_schema_version() == 3
+    assert s._get_schema_version() == 4
 
     # Verify indexes exist.
     indexes = {r[0] for r in s._conn.execute(
@@ -207,6 +207,58 @@ def test_update_account_auth_replaces_credentials(storage):
     got = storage.get_account_auth(aid)
     assert got.li_at == "new_cookie"
     assert got.jsessionid == "ajax:new"
+
+
+def test_account_runtime_roundtrip(storage):
+    """CRUD: create_account stores runtime hints and get_account_runtime returns them."""
+    runtime = LinkedInRuntimeHints(
+        x_li_track='{"clientVersion":"1.13.50000"}',
+        csrf_token="ajax:runtime123",
+        conversations_query_id="messengerConversations.live123",
+        messages_query_id="messengerMessages.live456",
+    )
+    aid = storage.create_account(
+        label="test",
+        auth=AccountAuth(li_at="cookie"),
+        proxy=None,
+        runtime=runtime,
+    )
+    got = storage.get_account_runtime(aid)
+    assert got == runtime
+
+
+def test_update_account_runtime_merges_partial_values(storage):
+    """Partial runtime updates preserve previously captured fields."""
+    initial = LinkedInRuntimeHints(
+        x_li_track='{"clientVersion":"1.13.50000"}',
+        conversations_query_id="messengerConversations.old123",
+    )
+    aid = storage.create_account(
+        label="test",
+        auth=AccountAuth(li_at="cookie"),
+        proxy=None,
+        runtime=initial,
+    )
+    merged = storage.update_account_runtime(
+        aid,
+        LinkedInRuntimeHints(
+            csrf_token="ajax:newcsrf",
+            messages_query_id="messengerMessages.new456",
+        ),
+    )
+    assert merged == LinkedInRuntimeHints(
+        x_li_track='{"clientVersion":"1.13.50000"}',
+        csrf_token="ajax:newcsrf",
+        conversations_query_id="messengerConversations.old123",
+        messages_query_id="messengerMessages.new456",
+    )
+    assert storage.get_account_runtime(aid) == merged
+
+
+def test_get_account_runtime_returns_none_when_not_set(storage):
+    """Edge case: get_account_runtime returns None for accounts without runtime hints."""
+    aid = storage.create_account(label="test", auth=AccountAuth(li_at="cookie"), proxy=None)
+    assert storage.get_account_runtime(aid) is None
 
 
 def test_update_account_auth_raises_for_unknown(storage):

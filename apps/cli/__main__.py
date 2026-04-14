@@ -15,7 +15,7 @@ from typing import Sequence
 import httpx
 
 from libs.core.job_runner import run_send, run_sync, SendResult, SyncConfig, SyncResult
-from libs.core.models import AccountAuth, ProxyConfig
+from libs.core.models import AccountAuth, LinkedInRuntimeHints, ProxyConfig
 from libs.core.redaction import configure_logging
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider
@@ -125,25 +125,34 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     return args
 
 
-def _account_must_exist(storage: Storage, account_id: int) -> tuple[AccountAuth, ProxyConfig | None]:
+def _account_must_exist(
+    storage: Storage,
+    account_id: int,
+) -> tuple[AccountAuth, ProxyConfig | None, LinkedInRuntimeHints | None]:
     if account_id < 1:
         raise ValueError("account id must be a positive integer")
     auth = storage.get_account_auth(account_id)
     proxy = storage.get_account_proxy(account_id)
-    return auth, proxy
+    runtime_hints = storage.get_account_runtime(account_id)
+    return auth, proxy, runtime_hints
 
 
 def _load_provider(storage: Storage, account_id: int) -> LinkedInProvider | int:
     """Return a provider for ``account_id``, or exit code ``1`` on account errors."""
     try:
-        auth, proxy = _account_must_exist(storage, account_id)
+        auth, proxy, runtime_hints = _account_must_exist(storage, account_id)
     except KeyError:
         _stderr(f"error: account {account_id} not found")
         return 1
     except ValueError as exc:
         _stderr(f"error: {exc}")
         return 1
-    return LinkedInProvider(auth=auth, proxy=proxy, account_id=account_id)
+    return LinkedInProvider(
+        auth=auth,
+        proxy=proxy,
+        account_id=account_id,
+        runtime_hints=runtime_hints,
+    )
 
 
 def _cmd_sync(storage: Storage, args: argparse.Namespace) -> int:

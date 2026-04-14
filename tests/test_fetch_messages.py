@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from libs.core.models import AccountAuth, ProxyConfig
+from libs.core.models import AccountAuth, LinkedInRuntimeHints, ProxyConfig
 from libs.providers.linkedin.provider import (
     LinkedInMessage,
     LinkedInProvider,
@@ -335,6 +335,51 @@ class TestFetchMessages:
             )
         url = mock_client.get.call_args[0][0]
         assert "conversationUrn:urn:li:msg_conversation:ABC" in url
+        assert _MESSAGES_QUERY_ID in url
+
+    def test_runtime_messages_query_id_overrides_default(self, auth):
+        p = LinkedInProvider(
+            auth=auth,
+            runtime_hints=LinkedInRuntimeHints(
+                messages_query_id="messengerMessages.live456",
+            ),
+        )
+        p._browser_cookies = {"li_at": "test-li-at", "JSESSIONID": "ajax:csrf123", "__cf_bm": "fake"}
+        p._profile_id = "urn:li:fsd_profile:ABC123"
+        p._profile_id_fetched = True
+        data = _graphql_messages_response([])
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        mock_client.get.return_value = _mock_resp(data)
+        with _patch_client(mock_client):
+            p.fetch_messages(
+                platform_thread_id="urn:li:msg_conversation:ABC",
+                cursor=None,
+            )
+        url = mock_client.get.call_args[0][0]
+        assert "messengerMessages.live456" in url
+        assert _MESSAGES_QUERY_ID not in url
+
+    def test_invalid_runtime_messages_query_id_falls_back(self, auth):
+        p = LinkedInProvider(
+            auth=auth,
+            runtime_hints=LinkedInRuntimeHints(
+                messages_query_id="not-a-linkedin-query-id",
+            ),
+        )
+        p._browser_cookies = {"li_at": "test-li-at", "JSESSIONID": "ajax:csrf123", "__cf_bm": "fake"}
+        p._profile_id = "urn:li:fsd_profile:ABC123"
+        p._profile_id_fetched = True
+        data = _graphql_messages_response([])
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        mock_client.get.return_value = _mock_resp(data)
+        with _patch_client(mock_client):
+            p.fetch_messages(
+                platform_thread_id="urn:li:msg_conversation:ABC",
+                cursor=None,
+            )
+        url = mock_client.get.call_args[0][0]
         assert _MESSAGES_QUERY_ID in url
 
     def test_limit_in_url(self, provider):

@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import httpx
 
-from libs.core.models import AccountAuth, ProxyConfig
+from libs.core.models import AccountAuth, LinkedInRuntimeHints, ProxyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,9 @@ _BROWSER_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 )
+
+_CONVERSATIONS_QUERY_PREFIX = "messengerConversations."
+_MESSAGES_QUERY_PREFIX = "messengerMessages."
 
 
 @dataclass(frozen=True)
@@ -332,10 +335,12 @@ class LinkedInProvider:
         auth: AccountAuth,
         proxy: Optional[ProxyConfig] = None,
         account_id: Optional[int] = None,
+        runtime_hints: Optional[LinkedInRuntimeHints] = None,
     ):
         self.auth = auth
         self.proxy = proxy
         self._account_id = account_id
+        self.runtime_hints = runtime_hints
         # send_message state (upstream)
         self._sent_keys: dict[str, str] = {}
         self._last_send_ts: float = 0.0
@@ -394,23 +399,17 @@ class LinkedInProvider:
         self.close()
 
     def _build_graphql_headers(self) -> dict[str, str]:
-        if not self.auth.jsessionid or not self.auth.jsessionid.strip():
+        csrf_token = self._graphql_csrf_token()
+        if not csrf_token:
             raise ValueError("JSESSIONID cookie required for Voyager API (CSRF)")
         return {
             "User-Agent": _BROWSER_USER_AGENT,
             "Accept": "application/graphql",
             "x-restli-protocol-version": "2.0.0",
-            "x-li-track": json.dumps({
-                "clientVersion": "1.13.42912",
-                "mpVersion": "1.13.42912",
-                "osName": "web",
-                "timezoneOffset": 0,
-                "deviceFormFactor": "DESKTOP",
-                "mpName": "voyager-web",
-            }),
+            "x-li-track": self._graphql_x_li_track(),
             "x-li-page-instance": "urn:li:page:d_flagship3_messaging",
             "x-li-lang": "en_US",
-            "csrf-token": self.auth.jsessionid,
+            "csrf-token": csrf_token,
             "referer": _MESSAGING_PAGE_URL,
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
@@ -444,7 +443,7 @@ class LinkedInProvider:
             "User-Agent": _BROWSER_USER_AGENT,
             "Accept": "application/vnd.linkedin.normalized+json+2.1",
             "x-restli-protocol-version": "2.0.0",
-            "csrf-token": self.auth.jsessionid or "",
+            "csrf-token": self._graphql_csrf_token(),
         }
         cookies = self._build_basic_cookies()
         try:
@@ -591,7 +590,8 @@ class LinkedInProvider:
                 variables += f",syncToken:{sync_token}"
             variables += ")"
 
-            url = f"{_GRAPHQL_BASE}?queryId={_CONVERSATIONS_QUERY_ID}&variables={variables}"
+            conversations_query_id = self._conversations_query_id()
+            url = f"{_GRAPHQL_BASE}?queryId={conversations_query_id}&variables={variables}"
 
             resp = self._get_with_retry(
                 client, url, headers=headers, cookies=cookies,
@@ -698,7 +698,8 @@ class LinkedInProvider:
             variables += f",createdBefore:{cursor}"
         variables += ")"
 
-        url = f"{_GRAPHQL_BASE}?queryId={_MESSAGES_QUERY_ID}&variables={variables}"
+        messages_query_id = self._messages_query_id()
+        url = f"{_GRAPHQL_BASE}?queryId={messages_query_id}&variables={variables}"
 
         resp = self._get_with_retry(
             client, url, headers=headers, cookies=cookies,
@@ -888,3 +889,54 @@ class LinkedInProvider:
             return AuthCheckResult(ok=False, error="invalid JSESSIONID cookie")
 
         return AuthCheckResult(ok=True, error=None)
+
+    def _graphql_csrf_token(self) -> str:
+        if self.runtime_hints and self.runtime_hints.csrf_token:
+            token = self.runtime_hints.csrf_token.strip()
+            if token:
+                return token
+        return (self.auth.jsessionid or "").strip()
+
+    def _graphql_x_li_track(self) -> str:
+        if self.runtime_hints and self.runtime_hints.x_li_track:
+            value = self.runtime_hints.x_li_track.strip()
+            if value:
+                return value
+        return json.dumps({
+            "clientVersion": "1.13.42912",
+            "mpVersion": "1.13.42912",
+            "osName": "web",
+            "timezoneOffset": 0,
+            "deviceFormFactor": "DESKTOP",
+            "mpName": "voyager-web",
+        })
+
+    def _conversations_query_id(self) -> str:
+        value = None
+        if self.runtime_hints:
+            value = self._validated_query_id(
+                self.runtime_hints.conversations_query_id,
+                _CONVERSATIONS_QUERY_PREFIX,
+            )
+        return value or _CONVERSATIONS_QUERY_ID
+
+    def _messages_query_id(self) -> str:
+        value = None
+        if self.runtime_hints:
+            value = self._validated_query_id(
+                self.runtime_hints.messages_query_id,
+                _MESSAGES_QUERY_PREFIX,
+            )
+        return value or _MESSAGES_QUERY_ID
+
+    def _validated_query_id(self, value: Optional[str], prefix: str) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned or not cleaned.startswith(prefix):
+            logger.warning(
+                "Ignoring invalid LinkedIn runtime queryId for prefix %s",
+                prefix[:-1],
+            )
+            return None
+        return cleaned

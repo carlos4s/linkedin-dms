@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .crypto import decrypt_if_encrypted, encrypt_if_configured
-from .models import AccountAuth, ProxyConfig
+from .models import AccountAuth, LinkedInRuntimeHints, ProxyConfig
 
 
 def utcnow() -> datetime:
@@ -70,6 +70,10 @@ CREATE TABLE IF NOT EXISTS outbound_sends (
   FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_outbound_sends_account_status ON outbound_sends(account_id, status);
+"""
+
+_MIGRATION_4_ACCOUNT_RUNTIME = """
+ALTER TABLE accounts ADD COLUMN runtime_json TEXT;
 """
 
 
@@ -170,6 +174,7 @@ class Storage:
             (1, _MIGRATION_1_INDEXES),
             (2, _MIGRATION_2_MESSAGES_CHECK),
             (3, _MIGRATION_3_OUTBOUND_SENDS),
+            (4, _MIGRATION_4_ACCOUNT_RUNTIME),
         ]
         for version, sql in migrations:
             if version > current:
@@ -184,13 +189,18 @@ class Storage:
         label: str,
         auth: AccountAuth,
         proxy: Optional[ProxyConfig] = None,
+        runtime: Optional[LinkedInRuntimeHints] = None,
     ) -> int:
         created_at = utcnow().isoformat()
         auth_json = encrypt_if_configured(json.dumps(asdict(auth)))
         proxy_json = encrypt_if_configured(json.dumps(asdict(proxy))) if proxy else None
+        runtime_json = self._serialize_runtime(runtime)
         cur = self._conn.execute(
-            "INSERT INTO accounts(label, auth_json, proxy_json, created_at) VALUES (?, ?, ?, ?)",
-            (label, auth_json, proxy_json, created_at),
+            (
+                "INSERT INTO accounts(label, auth_json, proxy_json, runtime_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?)"
+            ),
+            (label, auth_json, proxy_json, runtime_json, created_at),
         )
         self._conn.commit()
         return int(cur.lastrowid)
@@ -230,6 +240,35 @@ class Storage:
         d = json.loads(decrypt_if_encrypted(row["proxy_json"]))
         return ProxyConfig(**d)
 
+    def get_account_runtime(self, account_id: int) -> Optional[LinkedInRuntimeHints]:
+        row = self._conn.execute("SELECT runtime_json FROM accounts WHERE id=?", (account_id,)).fetchone()
+        if not row:
+            raise KeyError(f"account {account_id} not found")
+        return self._deserialize_runtime(row["runtime_json"])
+
+    def update_account_runtime(
+        self,
+        account_id: int,
+        runtime: LinkedInRuntimeHints,
+    ) -> LinkedInRuntimeHints:
+        """Merge runtime metadata into an account and return the stored result."""
+        row = self._conn.execute(
+            "SELECT runtime_json FROM accounts WHERE id=?",
+            (account_id,),
+        ).fetchone()
+        if not row:
+            raise KeyError(f"account {account_id} not found")
+
+        existing = self._deserialize_runtime(row["runtime_json"])
+        merged = existing.merged_with(runtime) if existing else runtime
+        runtime_json = self._serialize_runtime(merged)
+        self._conn.execute(
+            "UPDATE accounts SET runtime_json=? WHERE id=?",
+            (runtime_json, account_id),
+        )
+        self._conn.commit()
+        return merged
+
     def upsert_thread(self, *, account_id: int, platform_thread_id: str, title: Optional[str]) -> int:
         created_at = utcnow().isoformat()
         self._conn.execute(
@@ -253,6 +292,20 @@ class Storage:
             (account_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def _serialize_runtime(self, runtime: Optional[LinkedInRuntimeHints]) -> Optional[str]:
+        if runtime is None or runtime.is_empty():
+            return None
+        return encrypt_if_configured(json.dumps(asdict(runtime)))
+
+    def _deserialize_runtime(self, raw: Optional[str]) -> Optional[LinkedInRuntimeHints]:
+        if not raw:
+            return None
+        data = json.loads(decrypt_if_encrypted(raw))
+        runtime = LinkedInRuntimeHints(**data)
+        if runtime.is_empty():
+            return None
+        return runtime
 
     def get_cursor(self, *, account_id: int, thread_id: int) -> Optional[str]:
         row = self._conn.execute(
