@@ -1,0 +1,119 @@
+"""Tests for provider error mapping in /sync and /send endpoints."""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from libs.core import crypto
+
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("DESEARCH_DB_PATH", str(tmp_path / "test.sqlite"))
+    monkeypatch.delenv("DESEARCH_ENCRYPTION_KEY", raising=False)
+    crypto._warned_no_key = False
+
+
+@pytest.fixture()
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv("DESEARCH_DB_PATH", str(tmp_path / "test.sqlite"))
+    from libs.core.storage import Storage
+
+    storage = Storage(db_path=tmp_path / "test.sqlite")
+    storage.migrate()
+
+    from apps.api.main import app
+    import apps.api.main as api_mod
+
+    original_storage = api_mod.storage
+    api_mod.storage = storage
+    yield TestClient(app)
+    api_mod.storage = original_storage
+    storage.close()
+
+
+def _create_account(client) -> int:
+    resp = client.post(
+        "/accounts",
+        json={"label": "test", "li_at": "AQEDAWx0Y29va2llXXX"},
+    )
+    assert resp.status_code == 200
+    return resp.json()["account_id"]
+
+
+def _make_http_status_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://www.linkedin.com/api")
+    response = httpx.Response(status_code=status_code, request=request)
+    return httpx.HTTPStatusError(
+        str(status_code), request=request, response=response,
+    )
+
+
+@patch("apps.api.main.run_sync")
+def test_sync_redirect_302_returns_401(mock_run_sync, client):
+    account_id = _create_account(client)
+    mock_run_sync.side_effect = PermissionError("LinkedIn redirected to login (HTTP 302)")
+    resp = client.post("/sync", json={"account_id": account_id})
+    assert resp.status_code == 401
+    assert "re-authenticate" in resp.json()["detail"].lower()
+
+
+@patch("apps.api.main.run_sync")
+def test_sync_redirect_303_returns_401(mock_run_sync, client):
+    account_id = _create_account(client)
+    mock_run_sync.side_effect = PermissionError("LinkedIn redirected to login (HTTP 303)")
+    resp = client.post("/sync", json={"account_id": account_id})
+    assert resp.status_code == 401
+    assert "re-authenticate" in resp.json()["detail"].lower()
+
+
+@patch("apps.api.main.run_send")
+def test_send_redirect_302_returns_401(mock_run_send, client):
+    account_id = _create_account(client)
+    mock_run_send.side_effect = PermissionError("LinkedIn redirected to login (HTTP 302)")
+    resp = client.post(
+        "/send",
+        json={"account_id": account_id, "recipient": "urn:li:fs_miniProfile:abc", "text": "hi"},
+    )
+    assert resp.status_code == 401
+    assert "re-authenticate" in resp.json()["detail"].lower()
+
+
+@patch("apps.api.main.run_send")
+def test_send_redirect_303_returns_401(mock_run_send, client):
+    account_id = _create_account(client)
+    mock_run_send.side_effect = PermissionError("LinkedIn redirected to login (HTTP 303)")
+    resp = client.post(
+        "/send",
+        json={"account_id": account_id, "recipient": "urn:li:fs_miniProfile:abc", "text": "hi"},
+    )
+    assert resp.status_code == 401
+    assert "re-authenticate" in resp.json()["detail"].lower()
+
+
+@patch("apps.api.main.run_send")
+def test_send_rate_limit_429_returns_429(mock_run_send, client):
+    account_id = _create_account(client)
+    mock_run_send.side_effect = _make_http_status_error(429)
+    resp = client.post(
+        "/send",
+        json={"account_id": account_id, "recipient": "urn:li:fs_miniProfile:abc", "text": "hi"},
+    )
+    assert resp.status_code == 429
+    assert "rate limit" in resp.json()["detail"].lower()
+
+
+@patch("apps.api.main.run_send")
+def test_send_rate_limit_999_returns_429(mock_run_send, client):
+    account_id = _create_account(client)
+    mock_run_send.side_effect = _make_http_status_error(999)
+    resp = client.post(
+        "/send",
+        json={"account_id": account_id, "recipient": "urn:li:fs_miniProfile:abc", "text": "hi"},
+    )
+    assert resp.status_code == 429
+    assert "rate limit" in resp.json()["detail"].lower()
