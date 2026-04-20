@@ -514,15 +514,14 @@ class TestListThreads:
         assert "mailboxUrn:urn:li:fsd_profile:ABC123" in url
 
     def test_raises_if_profile_id_unavailable(self, auth):
-        """Raises RuntimeError if profile ID cannot be determined."""
+        """Raises RuntimeError if profile ID cannot be determined (non-auth failure)."""
         p = LinkedInProvider(auth=auth)
         p._browser_cookies = {"li_at": "x"}
         p._profile_id = None
         mock_client = MagicMock()
         mock_client.is_closed = False
-        # Mock the /me call to return non-200
         me_resp = MagicMock()
-        me_resp.status_code = 302
+        me_resp.status_code = 500
         mock_client.get.return_value = me_resp
         with _patch_client(mock_client):
             with pytest.raises(RuntimeError, match="profile ID"):
@@ -669,12 +668,12 @@ class TestGetProfileId:
         assert mock_client.get.call_count == 1
 
     def test_profile_id_none_cached_when_api_fails(self, auth):
-        """If /me fails, we cache None and don't retry every call."""
+        """If /me fails with a non-auth status, we cache None and don't retry every call."""
         p = LinkedInProvider(auth=auth)
         mock_client = MagicMock()
         mock_client.is_closed = False
         me_resp = MagicMock()
-        me_resp.status_code = 403
+        me_resp.status_code = 500
         mock_client.get.return_value = me_resp
         with _patch_client(mock_client):
             first = p._get_profile_id()
@@ -682,6 +681,19 @@ class TestGetProfileId:
         assert first is None
         assert second is None
         assert mock_client.get.call_count == 1
+
+    @pytest.mark.parametrize("status_code", [302, 303, 401, 403])
+    def test_profile_id_raises_permission_error_on_auth_rejection(self, auth, status_code):
+        """Auth-rejection on /me surfaces as PermissionError, not silent None."""
+        p = LinkedInProvider(auth=auth)
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        me_resp = MagicMock()
+        me_resp.status_code = status_code
+        mock_client.get.return_value = me_resp
+        with _patch_client(mock_client):
+            with pytest.raises(PermissionError, match="session rejected"):
+                p._get_profile_id()
 
     def test_profile_id_from_public_identifier(self, auth):
         p = LinkedInProvider(auth=auth)
